@@ -30,7 +30,7 @@ type ExecRunner struct{}
 func (ExecRunner) Run(ctx context.Context, dir string, env []string, name string, args ...string) ([]byte, error) {
 	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.Dir = dir
-	cmd.Env = append(os.Environ(), env...)
+	cmd.Env = runtime.ChildEnviron(env)
 	trace := logctx.TraceExec(ctx, name, args, dir, slog.Any("env", logctx.EnvKeys(env)))
 	out, err := cmd.CombinedOutput()
 	trace(out, err)
@@ -163,13 +163,13 @@ func (b Backend) StreamLogs(ctx context.Context, req runtime.LogsRequest) (<-cha
 	if err != nil {
 		return nil, err
 	}
-	env, err := readEnvFile(req.EnvFile)
+	env, err := runtime.ReadEnvFile(req.EnvFile)
 	if err != nil {
 		return nil, err
 	}
 	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.Dir = req.Root
-	cmd.Env = append(os.Environ(), env...)
+	cmd.Env = runtime.ChildEnviron(env)
 	ch, err := runtime.StreamCommand(ctx, cmd, slog.Any("env", logctx.EnvKeys(env)))
 	if err != nil {
 		return nil, fmt.Errorf("%s %s: %w", name, strings.Join(args, " "), err)
@@ -268,7 +268,7 @@ func (b Backend) run(ctx context.Context, root string, envFile string, args ...s
 			return nil, err
 		}
 	}
-	env, err := readEnvFile(envFile)
+	env, err := runtime.ReadEnvFile(envFile)
 	if err != nil {
 		return nil, err
 	}
@@ -285,14 +285,14 @@ func (b Backend) runLimited(ctx context.Context, root string, envFile string, ma
 	if err != nil {
 		return nil, err
 	}
-	env, err := readEnvFile(envFile)
+	env, err := runtime.ReadEnvFile(envFile)
 	if err != nil {
 		return nil, err
 	}
 	buf := &limitedBuffer{remaining: maxBytes}
 	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.Dir = root
-	cmd.Env = append(os.Environ(), env...)
+	cmd.Env = runtime.ChildEnviron(env)
 	cmd.Stdout = buf
 	cmd.Stderr = buf
 	trace := logctx.TraceExec(ctx, name, args, root, slog.Any("env", logctx.EnvKeys(env)))
@@ -309,13 +309,13 @@ func (b Backend) runForeground(ctx context.Context, root string, envFile string,
 	if err != nil {
 		return err
 	}
-	env, err := readEnvFile(envFile)
+	env, err := runtime.ReadEnvFile(envFile)
 	if err != nil {
 		return err
 	}
 	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.Dir = root
-	cmd.Env = append(os.Environ(), env...)
+	cmd.Env = runtime.ChildEnviron(env)
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
 	cmd.Cancel = func() error {
@@ -509,36 +509,4 @@ func (b Backend) clientArgs(controlPort int) []string {
 		controlPort = 8080
 	}
 	return []string{"--address", "127.0.0.1", "--port", strconv.Itoa(controlPort)}
-}
-
-func readEnvFile(path string) ([]string, error) {
-	if path == "" {
-		return nil, nil
-	}
-	f, err := os.Open(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil
-		}
-		return nil, err
-	}
-	defer f.Close()
-	var env []string
-	scanner := bufio.NewScanner(f)
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
-		}
-		key, value, ok := strings.Cut(line, "=")
-		if !ok {
-			continue
-		}
-		value = strings.TrimSpace(value)
-		if unquoted, err := strconv.Unquote(value); err == nil {
-			value = unquoted
-		}
-		env = append(env, strings.TrimSpace(key)+"="+value)
-	}
-	return env, scanner.Err()
 }

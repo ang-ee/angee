@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -15,28 +17,34 @@ import (
 func TestExecRunnerTracesCommandWithRedactedArgs(t *testing.T) {
 	var logs bytes.Buffer
 	ctx := logctx.With(t.Context(), slog.New(logctx.NewCLIHandler(&logs, slog.LevelDebug)))
-	_, err := (ExecRunner{}).Run(ctx, "", "sh", "-c", "exit 0", "--token", "secret", "https://user:password@example.com/repo")
+	_, err := (ExecRunner{}).Run(ctx, "", []string{"API_TOKEN=env-secret"}, "sh", "-c", "exit 0", "--token", "secret", "https://user:password@example.com/repo")
 	if err != nil {
 		t.Fatalf("Run() error = %v", err)
 	}
 	got := logs.String()
 	if !strings.Contains(got, "exec sh -c exit 0 --token *** https://***@example.com/repo") ||
+		!strings.Contains(got, "env=[API_TOKEN]") ||
 		!strings.Contains(got, "exec finished duration=") {
 		t.Fatalf("trace output = %q", got)
 	}
 	if strings.Contains(got, "secret") || strings.Contains(got, "password") || strings.Contains(got, "user") {
 		t.Fatalf("trace output leaked secret data: %q", got)
 	}
+	if strings.Contains(got, "env-secret") {
+		t.Fatalf("trace output leaked env value: %q", got)
+	}
 }
 
 type recordingRunner struct {
 	name string
+	env  []string
 	args []string
 	out  []byte
 }
 
-func (r *recordingRunner) Run(_ context.Context, _ string, name string, args ...string) ([]byte, error) {
+func (r *recordingRunner) Run(_ context.Context, _ string, env []string, name string, args ...string) ([]byte, error) {
 	r.name = name
+	r.env = append([]string(nil), env...)
 	r.args = append([]string(nil), args...)
 	return r.out, nil
 }
@@ -163,4 +171,50 @@ func TestParsePSSkipsNonJSONLines(t *testing.T) {
 	if len(got) != 1 || got[0].Name != "web" || got[0].State != "running" {
 		t.Fatalf("parsePS() = %#v, want the single web record", got)
 	}
+}
+
+func TestBackendUpExportsEnvFileValues(t *testing.T) {
+	dir := t.TempDir()
+	envFile := filepath.Join(dir, ".env")
+	if err := os.WriteFile(envFile, []byte("A=1\n# a comment\nB=\"quoted\"\n"), 0o600); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+	runner := &recordingRunner{}
+	backend := Backend{Runner: runner}
+	err := backend.Up(context.Background(), runtime.Target{Root: dir, EnvFile: envFile, Services: []string{"web"}})
+	if err != nil {
+		t.Fatalf("Up() error = %v", err)
+	}
+	// The env file's current values are handed to the runner as the child's
+	// explicit environment, so they override any stale copy the operator
+	// inherited at start.
+	wantEnv := []string{"A=1", "B=quoted"}
+	if !reflect.DeepEqual(runner.env, wantEnv) {
+		t.Fatalf("env = %#v, want %#v", runner.env, wantEnv)
+	}
+	// The --env-file argument stays so compose still reads the file for keys
+	// the operator's environment does not carry.
+	if !argsContainPair(runner.args, "--env-file", envFile) {
+		t.Fatalf("args = %v, want --env-file %s", runner.args, envFile)
+	}
+}
+
+func TestExecRunnerEnvFileValueOverridesInheritedEnvironment(t *testing.T) {
+	t.Setenv("ANGEE_TEST_STALE", "stale")
+	out, err := (ExecRunner{}).Run(context.Background(), "", []string{"ANGEE_TEST_STALE=fresh"}, "sh", "-c", "printf %s \"$ANGEE_TEST_STALE\"")
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if string(out) != "fresh" {
+		t.Fatalf("output = %q, want fresh", out)
+	}
+}
+
+func argsContainPair(args []string, flag, value string) bool {
+	for i := 0; i+1 < len(args); i++ {
+		if args[i] == flag && args[i+1] == value {
+			return true
+		}
+	}
+	return false
 }

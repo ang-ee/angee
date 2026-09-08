@@ -6,6 +6,15 @@ latest tag.
 
 ## Unreleased
 
+### Fixed
+
+- **Container services see the current env-file values.** The compose backend
+  now exports the stack env file into `docker compose`'s environment (as the
+  process-compose backend already did), so a secret updated after the operator
+  started (`secretSet`, agent reprovision) is rendered fresh instead of being
+  shadowed by the stale copy the operator inherited from its own environment at
+  start; `up` therefore recreates the container with the new value.
+
 ## v0.13.0 — 2026-09-05
 
 ### Added

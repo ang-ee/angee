@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -18,15 +19,16 @@ import (
 )
 
 type Runner interface {
-	Run(ctx context.Context, dir string, name string, args ...string) ([]byte, error)
+	Run(ctx context.Context, dir string, env []string, name string, args ...string) ([]byte, error)
 }
 
 type ExecRunner struct{}
 
-func (ExecRunner) Run(ctx context.Context, dir string, name string, args ...string) ([]byte, error) {
+func (ExecRunner) Run(ctx context.Context, dir string, env []string, name string, args ...string) ([]byte, error) {
 	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.Dir = dir
-	trace := logctx.TraceExec(ctx, name, args, dir)
+	cmd.Env = runtime.ChildEnviron(env)
+	trace := logctx.TraceExec(ctx, name, args, dir, slog.Any("env", logctx.EnvKeys(env)))
 	out, err := cmd.CombinedOutput()
 	trace(out, err)
 	if err != nil {
@@ -47,7 +49,7 @@ func (b Backend) Build(ctx context.Context, target runtime.Target) error {
 	args := b.baseArgs(target.Root, target.EnvFile)
 	args = append(args, "build")
 	args = append(args, target.Services...)
-	_, err := b.run(ctx, target.Root, args...)
+	_, err := b.run(ctx, target.Root, target.EnvFile, args...)
 	return err
 }
 
@@ -58,7 +60,7 @@ func (b Backend) Up(ctx context.Context, target runtime.Target) error {
 		args = append(args, "--build")
 	}
 	args = append(args, target.Services...)
-	_, err := b.run(ctx, target.Root, args...)
+	_, err := b.run(ctx, target.Root, target.EnvFile, args...)
 	return err
 }
 
@@ -74,13 +76,13 @@ func (b Backend) UpForeground(ctx context.Context, target runtime.Target, stdout
 		args = append(args, "--build")
 	}
 	args = append(args, target.Services...)
-	return b.runForeground(ctx, target.Root, stdout, stderr, target.Attached, args...)
+	return b.runForeground(ctx, target.Root, target.EnvFile, stdout, stderr, target.Attached, args...)
 }
 
 func (b Backend) Down(ctx context.Context, target runtime.Target) error {
 	args := b.baseArgs(target.Root, target.EnvFile)
 	args = append(args, "down")
-	_, err := b.run(ctx, target.Root, args...)
+	_, err := b.run(ctx, target.Root, target.EnvFile, args...)
 	return err
 }
 
@@ -88,7 +90,7 @@ func (b Backend) Start(ctx context.Context, target runtime.Target) error {
 	args := b.baseArgs(target.Root, target.EnvFile)
 	args = append(args, "start")
 	args = append(args, target.Services...)
-	_, err := b.run(ctx, target.Root, args...)
+	_, err := b.run(ctx, target.Root, target.EnvFile, args...)
 	return err
 }
 
@@ -96,7 +98,7 @@ func (b Backend) Stop(ctx context.Context, target runtime.Target) error {
 	args := b.baseArgs(target.Root, target.EnvFile)
 	args = append(args, "stop")
 	args = append(args, target.Services...)
-	_, err := b.run(ctx, target.Root, args...)
+	_, err := b.run(ctx, target.Root, target.EnvFile, args...)
 	return err
 }
 
@@ -104,7 +106,7 @@ func (b Backend) Restart(ctx context.Context, target runtime.Target) error {
 	args := b.baseArgs(target.Root, target.EnvFile)
 	args = append(args, "restart")
 	args = append(args, target.Services...)
-	_, err := b.run(ctx, target.Root, args...)
+	_, err := b.run(ctx, target.Root, target.EnvFile, args...)
 	return err
 }
 
@@ -120,9 +122,9 @@ func (b Backend) Logs(ctx context.Context, req runtime.LogsRequest) (<-chan stri
 		err error
 	)
 	if req.MaxBytes > 0 {
-		out, err = b.runLimited(ctx, req.Root, req.MaxBytes, args...)
+		out, err = b.runLimited(ctx, req.Root, req.EnvFile, req.MaxBytes, args...)
 	} else {
-		out, err = b.run(ctx, req.Root, args...)
+		out, err = b.run(ctx, req.Root, req.EnvFile, args...)
 	}
 	if err != nil {
 		return nil, err
@@ -152,15 +154,20 @@ func (b Backend) StreamLogs(ctx context.Context, req runtime.LogsRequest) (<-cha
 	// A test Runner can't stream a live process, so capture through it and
 	// replay by line. The real ExecRunner streams below. Mirrors runForeground.
 	if b.Runner != nil && !isExecRunner(b.Runner) {
-		out, err := b.run(ctx, req.Root, args...)
+		out, err := b.run(ctx, req.Root, req.EnvFile, args...)
 		if err != nil {
 			return nil, err
 		}
 		return runtime.ReplayLines(ctx, out), nil
 	}
+	env, err := runtime.ReadEnvFile(req.EnvFile)
+	if err != nil {
+		return nil, err
+	}
 	cmd := exec.CommandContext(ctx, "docker", args...)
 	cmd.Dir = req.Root
-	ch, err := runtime.StreamCommand(ctx, cmd)
+	cmd.Env = runtime.ChildEnviron(env)
+	ch, err := runtime.StreamCommand(ctx, cmd, slog.Any("env", logctx.EnvKeys(env)))
 	if err != nil {
 		return nil, fmt.Errorf("docker %s: %w", strings.Join(args, " "), err)
 	}
@@ -170,32 +177,41 @@ func (b Backend) StreamLogs(ctx context.Context, req runtime.LogsRequest) (<-cha
 func (b Backend) Status(ctx context.Context, req runtime.StatusRequest) ([]runtime.ServiceStatus, error) {
 	args := b.baseArgs(req.Root, "")
 	args = append(args, "ps", "--format", "json")
-	out, err := b.run(ctx, req.Root, args...)
+	out, err := b.run(ctx, req.Root, "", args...)
 	if err != nil {
 		return nil, err
 	}
 	return parsePS(out)
 }
 
-func (b Backend) run(ctx context.Context, root string, args ...string) ([]byte, error) {
+func (b Backend) run(ctx context.Context, root string, envFile string, args ...string) ([]byte, error) {
 	if b.Runner == nil {
 		b.Runner = ExecRunner{}
 	}
-	return b.Runner.Run(ctx, root, "docker", args...)
+	env, err := runtime.ReadEnvFile(envFile)
+	if err != nil {
+		return nil, err
+	}
+	return b.Runner.Run(ctx, root, env, "docker", args...)
 }
 
-func (b Backend) runLimited(ctx context.Context, root string, maxBytes int, args ...string) ([]byte, error) {
+func (b Backend) runLimited(ctx context.Context, root string, envFile string, maxBytes int, args ...string) ([]byte, error) {
 	if b.Runner != nil {
 		if !isExecRunner(b.Runner) {
-			return b.run(ctx, root, args...)
+			return b.run(ctx, root, envFile, args...)
 		}
+	}
+	env, err := runtime.ReadEnvFile(envFile)
+	if err != nil {
+		return nil, err
 	}
 	buf := &limitedBuffer{remaining: maxBytes}
 	cmd := exec.CommandContext(ctx, "docker", args...)
 	cmd.Dir = root
+	cmd.Env = runtime.ChildEnviron(env)
 	cmd.Stdout = buf
 	cmd.Stderr = buf
-	trace := logctx.TraceExec(ctx, "docker", args, root)
+	trace := logctx.TraceExec(ctx, "docker", args, root, slog.Any("env", logctx.EnvKeys(env)))
 	runErr := cmd.Run()
 	trace(buf.Bytes(), runErr)
 	if runErr != nil {
@@ -204,15 +220,20 @@ func (b Backend) runLimited(ctx context.Context, root string, maxBytes int, args
 	return buf.Bytes(), nil
 }
 
-func (b Backend) runForeground(ctx context.Context, root string, stdout io.Writer, stderr io.Writer, graceful bool, args ...string) error {
+func (b Backend) runForeground(ctx context.Context, root string, envFile string, stdout io.Writer, stderr io.Writer, graceful bool, args ...string) error {
 	// A test Runner can't stream a live process, so route through it (capturing
 	// the command) instead of shelling out. The real ExecRunner streams below.
 	if b.Runner != nil && !isExecRunner(b.Runner) {
-		_, err := b.run(ctx, root, args...)
+		_, err := b.run(ctx, root, envFile, args...)
+		return err
+	}
+	env, err := runtime.ReadEnvFile(envFile)
+	if err != nil {
 		return err
 	}
 	cmd := exec.CommandContext(ctx, "docker", args...)
 	cmd.Dir = root
+	cmd.Env = runtime.ChildEnviron(env)
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
 	if graceful {
@@ -228,7 +249,7 @@ func (b Backend) runForeground(ctx context.Context, root string, stdout io.Write
 		}
 		cmd.WaitDelay = runtime.GracefulWaitDelay
 	}
-	trace := logctx.TraceExec(ctx, "docker", args, root)
+	trace := logctx.TraceExec(ctx, "docker", args, root, slog.Any("env", logctx.EnvKeys(env)))
 	runErr := cmd.Run()
 	trace(nil, runErr)
 	if runErr != nil {
