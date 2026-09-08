@@ -210,6 +210,31 @@ func TestExecRunnerEnvFileValueOverridesInheritedEnvironment(t *testing.T) {
 	}
 }
 
+func TestBackendStatusUsesEnvFile(t *testing.T) {
+	dir := t.TempDir()
+	envFile := filepath.Join(dir, ".env")
+	if err := os.WriteFile(envFile, []byte("A=1\n"), 0o600); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+	runner := &recordingRunner{out: []byte(`{"Service":"web","State":"running"}` + "\n")}
+	backend := Backend{Runner: runner}
+	got, err := backend.Status(context.Background(), runtime.StatusRequest{Root: dir, EnvFile: envFile})
+	if err != nil {
+		t.Fatalf("Status() error = %v", err)
+	}
+	// Status interpolates the compose file like every other invocation: the
+	// env file is both passed to compose and exported as the child's env.
+	if !argsContainPair(runner.args, "--env-file", envFile) {
+		t.Fatalf("args = %v, want --env-file %s", runner.args, envFile)
+	}
+	if !reflect.DeepEqual(runner.env, []string{"A=1"}) {
+		t.Fatalf("env = %#v, want [A=1]", runner.env)
+	}
+	if len(got) != 1 || got[0].Name != "web" || got[0].State != "running" {
+		t.Fatalf("statuses = %#v", got)
+	}
+}
+
 func argsContainPair(args []string, flag, value string) bool {
 	for i := 0; i+1 < len(args); i++ {
 		if args[i] == flag && args[i+1] == value {

@@ -45,7 +45,11 @@ type LogsRequest struct {
 }
 
 type StatusRequest struct {
-	Root        string
+	Root string
+	// EnvFile is the stack env file whose current values the backend exports
+	// to the status command, so `docker compose ps` interpolates the compose
+	// file from the same fresh values as every other compose invocation.
+	EnvFile     string
 	ControlPort int
 }
 

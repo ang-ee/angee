@@ -175,9 +175,9 @@ func (b Backend) StreamLogs(ctx context.Context, req runtime.LogsRequest) (<-cha
 }
 
 func (b Backend) Status(ctx context.Context, req runtime.StatusRequest) ([]runtime.ServiceStatus, error) {
-	args := b.baseArgs(req.Root, "")
+	args := b.baseArgs(req.Root, req.EnvFile)
 	args = append(args, "ps", "--format", "json")
-	out, err := b.run(ctx, req.Root, "", args...)
+	out, err := b.run(ctx, req.Root, req.EnvFile, args...)
 	if err != nil {
 		return nil, err
 	}

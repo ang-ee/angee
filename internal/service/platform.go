@@ -522,7 +522,7 @@ func (p *Platform) StackStatus(ctx context.Context) (api.StackStatusResponse, er
 func (p *Platform) runtimeServiceStates(ctx context.Context, stack *manifest.Stack) map[string]runtime.ServiceStatus {
 	states := map[string]runtime.ServiceStatus{}
 	if statusArtifactExists(filepath.Join(p.root, "docker-compose.yaml")) {
-		if statuses, err := p.composeBackend.Status(ctx, runtime.StatusRequest{Root: p.root}); err == nil {
+		if statuses, err := p.composeBackend.Status(ctx, runtime.StatusRequest{Root: p.root, EnvFile: p.runtimeEnvFile(stack)}); err == nil {
 			for _, s := range statuses {
 				states[s.Name] = s
 			}

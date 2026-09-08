@@ -6,6 +6,8 @@ latest tag.
 
 ## Unreleased
 
+## v0.14.0 — 2026-09-08
+
 ### Fixed
 
 - **Container services see the current env-file values.** The compose backend
@@ -13,7 +15,9 @@ latest tag.
   process-compose backend already did), so a secret updated after the operator
   started (`secretSet`, agent reprovision) is rendered fresh instead of being
   shadowed by the stale copy the operator inherited from its own environment at
-  start; `up` therefore recreates the container with the new value.
+  start; `up` therefore recreates the container with the new value. Status
+  (`docker compose ps`) reads the same env file so it interpolates the
+  compose file from the same fresh values.
 
 ## v0.13.0 — 2026-09-05
 
